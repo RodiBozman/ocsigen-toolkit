@@ -52,6 +52,12 @@ let default_intl =
     i_start = `Sun;
   }
 
+type period = { start : int; limit : int }
+
+let default_period =
+  let d = A.today () in
+  { start = 1900; limit = A.year d }
+
 type button_labels = {
   b_prev_year : string;
   b_prev_month : string;
@@ -86,6 +92,50 @@ let int_of_dow = function
   | `Thu -> 4
   | `Fri -> 5
   | `Sat -> 6
+
+let string_of_month = function
+  | A.Jan -> "Jan"
+  | A.Feb -> "Feb"
+  | A.Mar -> "Mar"
+  | A.Apr -> "Apr"
+  | A.May -> "May"
+  | A.Jun -> "Jun"
+  | A.Jul -> "Jul"
+  | A.Aug -> "Aug"
+  | A.Sep -> "Sep"
+  | A.Oct -> "Oct"
+  | A.Nov -> "Nov"
+  | A.Dec -> "Dec"
+
+let month_of_string = function
+  | "Jan" -> A.Jan
+  | "Feb" -> A.Feb
+  | "Mar" -> A.Mar
+  | "Apr" -> A.Apr
+  | "May" -> A.May
+  | "Jun" -> A.Jun
+  | "Jul" -> A.Jul
+  | "Aug" -> A.Aug
+  | "Sep" -> A.Sep
+  | "Oct" -> A.Oct
+  | "Nov" -> A.Nov
+  | "Dec" -> A.Dec
+  | _ -> failwith "not_a_month"
+
+let int_of_smonth = function
+  | "Jan" -> 1
+  | "Feb" -> 2
+  | "Mar" -> 3
+  | "Apr" -> 4
+  | "May" -> 5
+  | "Jun" -> 6
+  | "Jul" -> 7
+  | "Aug" -> 8
+  | "Sep" -> 9
+  | "Oct" -> 10
+  | "Nov" -> 11
+  | "Dec" -> 12
+  | _ -> failwith "not_a_month"
 
 let rec rotate_list ?(acc = []) l i =
   if i <= 0 then List.append l (List.rev acc)
@@ -145,6 +195,19 @@ let zeroth_displayed_day ~intl d =
 let rec build_calendar ?prehilight
     ~button_labels:{ b_prev_year; b_prev_month; b_next_month; b_next_year }
     ~intl day =
+  let s_y ?(start = default_period.start) ?(limit = default_period.limit) () =
+    let d = A.today () in
+    let year = A.year d |> string_of_int in
+    D.(
+      select
+        ~a:[ a_name "ot-c-select-year" ]
+        (List.init
+           (limit - start + 1)
+           (fun i ->
+             let y = string_of_int (limit - i) in
+             if year = y then option ~a:[ a_value y; a_selected () ] (txt y)
+             else option ~a:[ a_value y ] (txt y))))
+  in
   let fst_dow = fst_dow ~intl day
   and zero = zeroth_displayed_day ~intl day
   and prev_button =
@@ -155,7 +218,17 @@ let rec build_calendar ?prehilight
     D.(span ~a:[ a_class [ "ot-c-prev-year-button" ] ] [ txt b_prev_year ])
   and next_year_button =
     D.(span ~a:[ a_class [ "ot-c-next-year-button" ] ] [ txt b_next_year ])
-  in
+  and select_month =
+    let d = A.today () in
+    let month = A.month d |> string_of_month in
+    D.(
+      select
+        ~a:[ a_name "ot-c-select-month" ]
+        ( default_intl.i_months
+        |> List.map (fun m ->
+               if month = m then option ~a:[ a_value m; a_selected () ] (txt m)
+               else option ~a:[ a_value m ] (txt m)) ))
+  and select_year = s_y () in
   let thead =
     D.(
       thead
@@ -167,7 +240,8 @@ let rec build_calendar ?prehilight
                 [
                   prev_year_button;
                   prev_button;
-                  CalendarLib.Printer.Date.sprint "%B %Y" fst_dow |> txt;
+                  select_month;
+                  select_year;
                   next_button;
                   next_year_button;
                 ];
@@ -201,6 +275,8 @@ let rec build_calendar ?prehilight
   ( build_table 5 6 ~a:[ D.a_class [ "ot-c-table" ] ] ~thead ~f_cell ~f_a_row,
     prev_button,
     next_button,
+    select_month,
+    select_year,
     prev_year_button,
     next_year_button )
 
@@ -272,28 +348,71 @@ let%client attach_events_lwt ?action ?click_non_highlighted ~intl d cal
   in
   Lwt.async f
 
+let%client bind_selectors target options value =
+  List.iteri
+    (fun i opt ->
+      if opt##.value = Js.string value then (
+        target##.selectedIndex := i;
+        Firebug.console##log (string_of_int i |> Js.string);
+        Firebug.console##log opt##.value;
+        Firebug.console##log (Js.string value) ))
+    options
+
+let%client make_handler selector value options fun_handler =
+  Dom_html.handler (fun _ ->
+      fun_handler ();
+      (* value () |> bind_selectors selector options; *)
+      Js._false)
+
 let%client attach_behavior ?highlight ?click_non_highlighted ?action ~intl d
-    (cal, prev, next, prev_year, next_year) f_d =
+    (cal, prev, next, select_month, select_year, prev_year, next_year) f_d =
+  let get_string_month d () = d () |> A.month |> string_of_month in
+  let get_string_year d () = d () |> A.year |> string_of_int in
   ( match highlight with
   | Some highlight ->
       attach_events_lwt ?click_non_highlighted ?action ~intl d cal highlight
   | None -> attach_events ?click_non_highlighted ?action ~intl d cal [] );
+  let rec get_options i acc options =
+    if i < 0 then acc
+    else
+      get_options (i - 1)
+        (Js.Opt.case (options##item i) (fun _ -> acc) (fun e -> e :: acc))
+        options
+  in
+  let s_y = To_dom.of_select select_year in
+  let s_m = To_dom.of_select select_month in
+  let s_y_v () = Js.to_string s_y##.value in
+  let s_m_v () = Js.to_string s_m##.value in
+  let options_year =
+    get_options (s_y##.options##.length - 1) [] s_y##.options
+  in
+  let options_month =
+    get_options (s_m##.options##.length - 1) [] s_m##.options
+  in
+  let select_handler () =
+    f_d
+      (A.make_year_month
+         (s_y_v () |> int_of_string)
+         (s_m_v () |> int_of_smonth))
+  in
+  s_y##.onchange := make_handler s_y s_y_v options_year select_handler;
+  s_m##.onchange := make_handler s_m s_m_v options_month select_handler;
+  let pv_month () = A.prev d `Month in
   (To_dom.of_element prev)##.onclick
-  := Dom_html.handler (fun _ ->
-         f_d (A.prev d `Month);
-         Js._false);
+  := (fun () -> pv_month () |> f_d)
+     |> make_handler s_m (get_string_month pv_month) options_month;
+  let nx_month () = A.next d `Month in
   (To_dom.of_element next)##.onclick
-  := Dom_html.handler (fun _ ->
-         f_d (A.next d `Month);
-         Js._false);
+  := (fun () -> nx_month () |> f_d)
+     |> make_handler s_m (get_string_month nx_month) options_month;
+  let pv_year () = A.prev d `Year in
   (To_dom.of_element prev_year)##.onclick
-  := Dom_html.handler (fun _ ->
-         f_d (A.prev d `Year);
-         Js._false);
+  := (fun () -> pv_year () |> f_d)
+     |> make_handler s_y (get_string_year pv_year) options_year;
+  let nx_year () = A.next d `Year in
   (To_dom.of_element next_year)##.onclick
-  := Dom_html.handler (fun _ ->
-         f_d (A.next d `Year);
-         Js._false)
+  := (fun () -> nx_year () |> f_d)
+     |> make_handler s_y (get_string_year nx_year) options_year
 
 let%client make :
     ?init:int * int * int ->
@@ -320,7 +439,7 @@ let%client make :
   CalendarLib.Printer.month_name := name_of_calendarlib_month intl;
   let d_ym, f_d_ym = React.S.create init_ym in
   let f d_ym =
-    let ((cal, _, _, _, _) as c) =
+    let ((cal, _, _, _, _, _, _) as c) =
       build_calendar ~intl ~button_labels ~prehilight:init d_ym
     in
     attach_behavior ?highlight ?click_non_highlighted ?action ~intl d_ym c
